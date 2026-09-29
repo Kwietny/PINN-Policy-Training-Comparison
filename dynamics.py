@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+STATE_NAMES = [ "x", "y", "vx", "vy", "angle", "angular_velocity", "left_contact", "right_contact", ]
 
 class PhysicsResidualDynamics(nn.Module):
     """
@@ -241,3 +242,54 @@ def train_dynamics_model(
         )
 
     return result
+
+@torch.no_grad()
+def evaluate_dynamics( model, replay_memory, device, batch_size=1024, ):
+    """ Evaluate one-step prediction error of the learned dynamics model on real transitions.
+    Returns: Dictionary containing:
+     - overall MSE
+     - per-state-variable MSE
+     - per-state-variable MAE
+     """
+    if len(replay_memory) == 0:
+        return None
+
+    model.eval()
+
+    n = min(batch_size, len(replay_memory))
+
+    transitions = replay_memory.sample(n)
+
+    states, actions, next_states, _, _ = zip( *transitions )
+
+    states = torch.cat(states).to(device)
+    actions = torch.cat(actions).to(device)
+    next_states = torch.cat(next_states).to(device)
+
+    predicted_next_states = model( states, actions )
+
+    # Difference between predicted and actual state.
+    error = ( predicted_next_states - next_states )
+
+    # Mean squared error for each state variable.
+    mse = error.pow(2).mean(dim=0)
+
+    # Mean absolute error for each state variable.
+    mae = error.abs().mean(dim=0)
+
+    # Overall errors.
+    overall_mse = error.pow(2).mean()
+    overall_mae = error.abs().mean()
+
+    results = {
+        "overall_mse": overall_mse.item(),
+        "overall_mae": overall_mae.item(),
+    }
+
+    for i, name in enumerate(STATE_NAMES):
+        results[f"{name}_mse"] = mse[i].item()
+        results[f"{name}_mae"] = mae[i].item()
+
+    model.train()
+
+    return results
