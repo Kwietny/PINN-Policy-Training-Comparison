@@ -90,3 +90,21 @@ class PhysicsResidualDynamics(nn.Module):
         )
 
         return predicted_next
+
+    def physics_loss(state, predicted_next, dt):
+        x = state[:, 0]
+        y = state[:, 1]
+
+        vx = state[:, 2]
+        vy = state[:, 3]
+
+        next_x = predicted_next[:, 0]
+        next_y = predicted_next[:, 1]
+
+        expected_x = x + vx * dt
+        expected_y = y + vy * dt
+
+        loss_x = (next_x - expected_x).pow(2).mean()
+        loss_y = (next_y - expected_y).pow(2).mean()
+
+        return loss_x + loss_y
