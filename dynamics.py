@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class PhysicsResidualDynamics(nn.Module):
@@ -14,11 +15,10 @@ class PhysicsResidualDynamics(nn.Module):
         predicted next state: [batch, 8]
     """
 
-    def __init__(self, dt=1.0, gravity=-0.15):
+    def __init__(self, dt=1.0):
         super().__init__()
 
         self.dt = dt
-        self.gravity = gravity
 
         # Action is represented as one-hot:
         # 0 = nothing
@@ -30,64 +30,48 @@ class PhysicsResidualDynamics(nn.Module):
             nn.ReLU(),
             nn.Linear(128, 128),
             nn.ReLU(),
-            nn.Linear(128, 6),
+            nn.Linear(128, 8),
         )
 
     def forward(self, state, action):
 
-        action_one_hot = torch.nn.functional.one_hot(
+        # action can arrive as [B, 1]
+        if action.dim() > 1:
+            action = action.squeeze(-1)
+
+        action_one_hot = F.one_hot(
             action.long(),
             num_classes=4
         ).float()
 
         x = torch.cat([state, action_one_hot], dim=1)
 
+        # Neural residual
         residual = self.residual_net(x)
 
         # -------------------------------------------------
         # Basic physics prior
         # -------------------------------------------------
 
-        physics_next = state[:, :6].clone()
+        physics_next = state.clone()
 
-        x_pos = state[:, 0]
-        y_pos = state[:, 1]
-
-        vx = state[:, 2]
-        vy = state[:, 3]
-
-        angle = state[:, 4]
-        angular_velocity = state[:, 5]
-
-        # Kinematics
-        physics_next[:, 0] = x_pos + vx * self.dt
-        physics_next[:, 1] = y_pos + vy * self.dt
-
-        # Gravity
-        physics_next[:, 2] = vx
-        physics_next[:, 3] = vy + self.gravity * self.dt
-
-        # Angular dynamics
-        physics_next[:, 4] = (
-            angle + angular_velocity * self.dt
+        # x(t+dt) = x(t) + vx(t) dt
+        physics_next[:, 0] = (
+            state[:, 0]
+            + state[:, 2] * self.dt
         )
 
-        physics_next[:, 5] = angular_velocity
-
-        # Residual correction
-        predicted_continuous = physics_next + residual
-
-        # Contact flags are initially learned directly.
-        predicted_contact = state[:, 6:8]
-
-        # We could predict them with another network later.
-        predicted_next = torch.cat(
-            [
-                predicted_continuous,
-                predicted_contact,
-            ],
-            dim=1
+        # y(t+dt) = y(t) + vy(t) dt
+        physics_next[:, 1] = (
+            state[:, 1]
+            + state[:, 3] * self.dt
         )
+
+        # Everything else is initially assumed unchanged.
+        #
+        # The neural network learns the correction.
+
+        predicted_next = physics_next + residual
 
         return predicted_next
 
@@ -156,21 +140,34 @@ class DynamicsTrainer:
             "physics_loss": physics.item(),
         }
 
-def physics_loss(state, predicted_next, dt):
-    x = state[:, 0]
-    y = state[:, 1]
+def physics_loss(
+    state,
+    predicted_next,
+    dt=1.0
+):
+    """
+    Penalize violations of basic kinematic relationships.
+    """
 
-    vx = state[:, 2]
-    vy = state[:, 3]
+    expected_x = (
+        state[:, 0]
+        + state[:, 2] * dt
+    )
 
-    next_x = predicted_next[:, 0]
-    next_y = predicted_next[:, 1]
+    expected_y = (
+        state[:, 1]
+        + state[:, 3] * dt
+    )
 
-    expected_x = x + vx * dt
-    expected_y = y + vy * dt
+    loss_x = (
+        predicted_next[:, 0]
+        - expected_x
+    ).pow(2).mean()
 
-    loss_x = (next_x - expected_x).pow(2).mean()
-    loss_y = (next_y - expected_y).pow(2).mean()
+    loss_y = (
+        predicted_next[:, 1]
+        - expected_y
+    ).pow(2).mean()
 
     return loss_x + loss_y
 
