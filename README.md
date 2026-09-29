@@ -9,5 +9,5 @@ Although we use simple lunar lander simulation(which is actually not very expens
 - https://github.com/wtcherr/lunar-lander-dqn - baseline solution 
 
 ## Files
-- baseline.py[baseline.py] - training the baseline model
-- dqn_inference[dqn_inference.py] - running the trained model in a visual environment
+- [baseline.py](baseline.py) - training the baseline model
+- [dqn_inference](dqn_inference.py) - running the trained model in a visual environment
