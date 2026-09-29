@@ -9,11 +9,13 @@ import numpy as np
 from torch.utils.tensorboard import SummaryWriter  # Import TensorBoard
 from dqn import DQN
 
+from dynamics import PhysicsResidualDynamics, DynamicsTrainer
+
 # Initialize TensorBoard writer
-writer = SummaryWriter()
+writer = SummaryWriter("runs/pinn_dqn")
 
 num_episodes = 200
-batch_size = 512
+batch_size = 128
 GAMMA = 0.99
 LR = 1e-4
 TAU = 0.005
@@ -22,8 +24,16 @@ EPSILON = 1.0  # Start with full exploration
 EPSILON_MIN = 0.01  # Minimum value
 EPSILON_DECAY = 0.995  # Decay factor per episode
 
-reward_list = []
-episode_durations = []
+REPLAY_CAPACITY = 10000
+
+# Dynamics model
+DYNAMICS_UPDATE_INTERVAL = 25
+DYNAMICS_EPOCHS = 20
+DYNAMICS_BATCH_SIZE = 256
+
+# How much model-generated experience is used
+MODEL_BATCH_SIZE = 64
+REAL_BATCH_SIZE = 64
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
@@ -41,11 +51,13 @@ class ReplayMemory:
         self.memory.append(Transition(*args))
 
     def sample(self, batch_size):
-        return (
-            random.sample(self.memory, batch_size)
-            if batch_size < len(self.memory)
-            else self.memory
+        return random.sample(
+            self.memory,
+            batch_size
         )
+
+    def clear(self):
+        self.memory.clear()
 
     def __len__(self):
         return len(self.memory)
@@ -61,7 +73,23 @@ policy_net = DQN(n_observations, n_actions).to(device)
 target_net = DQN(n_observations, n_actions).to(device)
 target_net.load_state_dict(policy_net.state_dict())
 
-replay_memory = ReplayMemory(10000)
+real_memory = ReplayMemory(REPLAY_CAPACITY)
+
+model_memory = ReplayMemory(REPLAY_CAPACITY)
+
+dynamics_model = PhysicsResidualDynamics(
+    dt=1.0
+).to(device)
+
+dynamics_trainer = DynamicsTrainer(
+    dynamics_model,
+    device=device,
+    learning_rate=1e-3,
+    physics_weight=0.1
+)
+
+optimizer = optim.AdamW(policy_net.parameters(), lr=LR)
+criterion = nn.SmoothL1Loss()
 
 
 def select_action(state):
@@ -73,87 +101,395 @@ def select_action(state):
         with torch.no_grad():
             return policy_net(state).max(1).indices.view(1, 1)  # Exploit (best action)
 
+def optimize_dqn():
+    total_available = (
+        len(real_memory)
+        + len(model_memory)
+    )
 
-optimizer = optim.AdamW(policy_net.parameters(), lr=LR)
-criterion = nn.SmoothL1Loss()
+    if total_available < batch_size:
+        return None
+
+    # ----------------------------------
+    # Prefer a balanced batch
+    # ----------------------------------
+
+    real_count = min(
+        REAL_BATCH_SIZE,
+        len(real_memory)
+    )
+
+    model_count = min(
+        MODEL_BATCH_SIZE,
+        len(model_memory)
+    )
+
+    # If model memory isn't available yet,
+    # use entirely real data.
+    if model_count == 0:
+        real_count = batch_size
+        model_count = 0
+
+    # Fill remaining slots from real data
+    if real_count + model_count < batch_size:
+
+        additional = (
+            batch_size
+            - real_count
+            - model_count
+        )
+
+        real_count = min(
+            len(real_memory),
+            real_count + additional
+        )
+
+    transitions = []
+
+    if real_count > 0:
+        transitions.extend(
+            random.sample(
+                real_memory.memory,
+                real_count
+            )
+        )
+
+    if model_count > 0:
+        transitions.extend(
+            random.sample(
+                model_memory.memory,
+                model_count
+            )
+        )
+
+    states, actions, next_states, rewards, dones = zip(
+        *transitions
+    )
+
+    states_batch = torch.cat(states)
+    actions_batch = torch.cat(actions)
+    next_states_batch = torch.cat(next_states)
+
+    rewards_batch = torch.cat(rewards)
+
+    dones_batch = torch.tensor(
+        dones,
+        dtype=torch.bool,
+        device=device
+    )
+
+    with torch.no_grad():
+
+        next_q = (
+            target_net(next_states_batch)
+            .max(1)[0]
+        )
+
+        q_target = (
+            rewards_batch
+            + GAMMA
+            * next_q
+            * (~dones_batch)
+        )
+
+    q_policy = (
+        policy_net(states_batch)
+        .gather(
+            1,
+            actions_batch
+        )
+    )
+
+    loss = criterion(
+        q_policy,
+        q_target.unsqueeze(1)
+    )
+
+    optimizer.zero_grad()
+
+    loss.backward()
+
+    torch.nn.utils.clip_grad_value_(
+        policy_net.parameters(),
+        100
+    )
+
+    optimizer.step()
+
+    return loss.item()
+
+
+def train_dynamics():
+    if len(real_memory) < DYNAMICS_BATCH_SIZE:
+        return None
+
+    last_result = None
+
+    for _ in range(DYNAMICS_EPOCHS):
+
+        transitions = random.sample(
+            real_memory.memory,
+            DYNAMICS_BATCH_SIZE
+        )
+
+        states, actions, next_states, _, _ = zip(
+            *transitions
+        )
+
+        states_batch = torch.cat(states)
+        actions_batch = torch.cat(actions)
+        next_states_batch = torch.cat(next_states)
+
+        last_result = dynamics_trainer.train_batch(
+            states_batch,
+            actions_batch,
+            next_states_batch
+        )
+
+    return last_result
+
+
+def generate_model_transitions(
+    num_samples=1000
+):
+    if len(real_memory) == 0:
+        return 0
+
+    dynamics_model.eval()
+
+    samples = random.choices(
+        real_memory.memory,
+        k=num_samples
+    )
+
+    states = torch.cat(
+        [sample.state for sample in samples]
+    )
+
+    actions = torch.cat(
+        [sample.action for sample in samples]
+    )
+
+    with torch.no_grad():
+
+        predicted_next_states = dynamics_model(
+            states,
+            actions
+        )
+
+    for i in range(num_samples):
+
+        state = states[i:i+1]
+        action = actions[i:i+1]
+
+        next_state = (
+            predicted_next_states[i:i+1]
+            .clamp(-10.0, 10.0)
+        )
+
+        # TEMPORARY reward approximation
+        reward = estimate_reward(
+            state,
+            action,
+            next_state
+        )
+
+        # done = estimate_done(
+        #     next_state
+        # )
+        done = False
+
+        model_memory.push(
+            state.detach(),
+            action.detach(),
+            next_state.detach(),
+            reward,
+            done
+        )
+
+    dynamics_model.train()
+
+    return num_samples
+
+def estimate_reward(
+    state,
+    action,
+    next_state
+):
+
+    # Position relative to landing region
+    x = next_state[0, 0]
+    y = next_state[0, 1]
+
+    vx = next_state[0, 2]
+    vy = next_state[0, 3]
+
+    angle = next_state[0, 4]
+
+    reward = 0.0
+
+    # Stay near center
+    reward -= 0.5 * torch.sqrt(
+        x * x + y * y + 1e-6
+    )
+
+    # Penalize high velocity
+    reward -= 0.1 * (
+        vx * vx + vy * vy
+    )
+
+    # Penalize excessive rotation
+    reward -= 0.1 * torch.abs(angle)
+
+    # Small fuel cost
+    action_value = action.item()
+
+    if action_value in [1, 3]:
+        reward -= 0.03
+
+    elif action_value == 2:
+        reward -= 0.3
+
+    return reward.detach().view(1)
+
+
+def estimate_done(next_state):
+
+    x = next_state[0, 0].item()
+    y = next_state[0, 1].item()
+
+    # Very crude initial approximation.
+    #
+    # This should NOT be considered
+    # the actual LunarLander termination rule.
+
+    if abs(x) > 2.0:
+        return True
+
+    if y < -1.0:
+        return True
+
+    return False
+
+reward_list = []
+episode_durations = []
 
 for episode in range(num_episodes):
-    print("Episode: ", episode)
+
+    print(
+        f"Episode {episode} | "
+        f"real={len(real_memory)} | "
+        f"model={len(model_memory)}"
+    )
+
     state, info = env.reset()
-    state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-    total_reward = 0
+
+    state = torch.tensor(
+        state,
+        dtype=torch.float32,
+        device=device
+    ).unsqueeze(0)
+
+    total_reward = 0.0
 
     for t in count():
+
         action = select_action(state)
-        next_state, reward, terminated, truncated, info = env.step(action.item())
 
-        done = terminated or truncated
-        reward = torch.tensor([reward], device=device)
-        next_state = torch.tensor(
-            next_state, dtype=torch.float32, device=device
+        next_state, reward, terminated, truncated, info = (
+            env.step(action.item())
+        )
+
+        done = (
+            terminated
+            or truncated
+        )
+
+        reward_tensor = torch.tensor(
+            [reward],
+            dtype=torch.float32,
+            device=device
+        )
+
+        next_state_tensor = torch.tensor(
+            next_state,
+            dtype=torch.float32,
+            device=device
         ).unsqueeze(0)
-        replay_memory.push(state, action, next_state, reward, done)
 
-        state = next_state
-        total_reward += reward.item()
+        # REAL TRANSITION
+        real_memory.push(
+            state,
+            action,
+            next_state_tensor,
+            reward_tensor,
+            done
+        )
 
-        if len(replay_memory) >= batch_size:
-            transitions = replay_memory.sample(batch_size)
-            states, actions, next_states, rewards, dones = zip(*transitions)
+        state = next_state_tensor
 
-            states_batch = torch.cat(states)
-            next_states_batch = torch.cat(next_states)
-            actions_batch = torch.cat(actions)
-            rewards = torch.tensor(rewards, device=device)
-            dones = torch.tensor(dones, device=device)
+        total_reward += reward
 
-            q_target = (
-                GAMMA * target_net(next_states_batch).detach().max(1)[0] * ~dones
-                + rewards
+        # NORMAL DQN UPDATE
+        loss = optimize_dqn()
+
+        if loss is not None:
+            writer.add_scalar(
+                "Loss/DQN",
+                loss,
+                episode
             )
-            q_policy = policy_net(states_batch).gather(1, actions_batch)
 
-            # Calculate the Huber loss
-            loss = criterion(q_policy, q_target.unsqueeze(1))
-
-            # Optimize the model
-            optimizer.zero_grad()
-            loss.backward()
-
-            # In-place gradient clipping to stabilize training
-            torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
-
-            optimizer.step()
-
-            # Log loss to TensorBoard
-            writer.add_scalar("Loss", loss.item(), episode)
-
-        # Update target network
+        # TARGET NETWORK UPDATE
         for target_param, main_param in zip(
-            target_net.parameters(), policy_net.parameters()
+            target_net.parameters(),
+            policy_net.parameters()
         ):
+
             target_param.data.copy_(
-                TAU * main_param.data + (1 - TAU) * target_param.data
+                TAU * main_param.data
+                + (1 - TAU)
+                * target_param.data
             )
 
         if done:
             episode_durations.append(t + 1)
             reward_list.append(total_reward)
-
-            # Log metrics to TensorBoard
-            writer.add_scalar("Reward", total_reward, episode)
-            writer.add_scalar("Episode Duration", t + 1, episode)
-            writer.add_scalar("Epsilon", EPSILON, episode)
             break
 
-    # Decay epsilon
+    # EPSILON DECAY
     EPSILON = max(EPSILON_MIN, EPSILON * EPSILON_DECAY)
+
+    writer.add_scalar("Reward", total_reward, episode)
+    writer.add_scalar("Episode Duration", episode_durations[-1], episode)
+    writer.add_scalar("Epsilon", EPSILON, episode)
+
+    # UPDATE DYNAMICS MODEL
+    if episode >= 25 and episode % 25 == 0:
+        print("Training dynamics model...")
+
+        result = train_dynamics()
+
+        # Old data generated by model is worse so we clear it
+        model_memory.clear()
+
+        if result is not None:
+            print("Dynamics:", result)
+
+            writer.add_scalar("Dynamics/Loss", result["loss"], episode)
+            writer.add_scalar("Dynamics/DataLoss", result["data_loss"], episode)
+            writer.add_scalar("Dynamics/PhysicsLoss", result["physics_loss"], episode)
+
+        # GENERATE SYNTHETIC EXPERIENCE
+        # generated = generate_model_transitions(num_samples=1000)
+
+        # print(f"Generated {generated} "f"synthetic transitions.")
 
 # Close TensorBoard writer
 writer.close()
 
 # Save the trained model
-torch.save(policy_net.state_dict(), "models/dqn_lunar_lander_300_128.pth")
+torch.save(policy_net.state_dict(), "models/dqn_lunar_lander_200_enhanced_test.pth")
 print("Model saved successfully!")
 
 print("Complete")
