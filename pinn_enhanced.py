@@ -1,4 +1,5 @@
 import random
+import datetime
 import gymnasium as gym
 from collections import namedtuple, deque
 from itertools import count
@@ -12,7 +13,8 @@ from dqn import DQN
 from dynamics import PhysicsResidualDynamics, DynamicsTrainer, STATE_NAMES, evaluate_dynamics
 
 # Initialize TensorBoard writer
-writer = SummaryWriter("runs/pinn_dqn")
+current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+writer = SummaryWriter(f'runs/pinn_dqn_{current_time}')
 
 num_episodes = 200
 batch_size = 128
@@ -504,15 +506,15 @@ for episode in range(num_episodes):
         model_memory.clear()
 
         # GENERATE SYNTHETIC EXPERIENCE
-        # generated = generate_model_transitions(num_samples=1000)
+        generated = generate_model_transitions(num_samples=1000)
 
-        # print(f"Generated {generated} "f"synthetic transitions.")
+        print(f"Generated {generated} "f"synthetic transitions.")
 
 # Close TensorBoard writer
 writer.close()
 
 # Save the trained model
-torch.save(policy_net.state_dict(), "models/dqn_lunar_lander_200_enhanced_test.pth")
+torch.save(policy_net.state_dict(), "models/dqn_lunar_lander_200_enhanced.pth")
 print("Model saved successfully!")
 
 print("Complete")
