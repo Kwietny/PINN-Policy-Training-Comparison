@@ -91,20 +91,85 @@ class PhysicsResidualDynamics(nn.Module):
 
         return predicted_next
 
-    def physics_loss(state, predicted_next, dt):
-        x = state[:, 0]
-        y = state[:, 1]
+class DynamicsTrainer:
 
-        vx = state[:, 2]
-        vy = state[:, 3]
+    def __init__(
+        self,
+        model,
+        device,
+        learning_rate=1e-3,
+        physics_weight=0.1,
+    ):
+        self.model = model.to(device)
+        self.device = device
+        self.physics_weight = physics_weight
 
-        next_x = predicted_next[:, 0]
-        next_y = predicted_next[:, 1]
+        self.optimizer = torch.optim.Adam(
+            self.model.parameters(),
+            lr=learning_rate,
+        )
 
-        expected_x = x + vx * dt
-        expected_y = y + vy * dt
+    def train_step(
+        self,
+        states,
+        actions,
+        next_states,
+    ):
 
-        loss_x = (next_x - expected_x).pow(2).mean()
-        loss_y = (next_y - expected_y).pow(2).mean()
+        states = states.to(self.device)
+        actions = actions.to(self.device)
+        next_states = next_states.to(self.device)
 
-        return loss_x + loss_y
+        predicted_next = self.model(
+            states,
+            actions,
+        )
+
+        data_loss = (
+            predicted_next - next_states
+        ).pow(2).mean()
+
+        physics = physics_loss(
+            states,
+            predicted_next,
+            self.model.dt,
+        )
+
+        loss = (
+            data_loss
+            + self.physics_weight * physics
+        )
+
+        self.optimizer.zero_grad()
+        loss.backward()
+
+        torch.nn.utils.clip_grad_norm_(
+            self.model.parameters(),
+            10.0,
+        )
+
+        self.optimizer.step()
+
+        return {
+            "loss": loss.item(),
+            "data_loss": data_loss.item(),
+            "physics_loss": physics.item(),
+        }
+
+def physics_loss(state, predicted_next, dt):
+    x = state[:, 0]
+    y = state[:, 1]
+
+    vx = state[:, 2]
+    vy = state[:, 3]
+
+    next_x = predicted_next[:, 0]
+    next_y = predicted_next[:, 1]
+
+    expected_x = x + vx * dt
+    expected_y = y + vy * dt
+
+    loss_x = (next_x - expected_x).pow(2).mean()
+    loss_y = (next_y - expected_y).pow(2).mean()
+
+    return loss_x + loss_y
