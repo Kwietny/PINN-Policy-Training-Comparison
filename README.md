@@ -7,3 +7,7 @@ Although we use simple lunar lander simulation(which is actually not very expens
 ## Sources
 - https://gymnasium.farama.org/environments/box2d/lunar_lander/ - our simulation framework
 - https://github.com/wtcherr/lunar-lander-dqn - baseline solution 
+
+## Files
+- baseline.py[baseline.py] - training the baseline model
+- dqn_inference[dqn_inference.py] - running the trained model in a visual environment
