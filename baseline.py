@@ -13,7 +13,7 @@ from dqn import DQN
 writer = SummaryWriter()
 
 num_episodes = 200
-batch_size = 512
+batch_size = 128
 GAMMA = 0.99
 LR = 1e-4
 TAU = 0.005
