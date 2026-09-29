@@ -8,9 +8,11 @@ import torch.optim as optim
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter  # Import TensorBoard
 from dqn import DQN
+import datetime
 
 # Initialize TensorBoard writer
-writer = SummaryWriter()
+current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+writer = SummaryWriter(f'runs/dqn_{current_time}')
 
 num_episodes = 200
 batch_size = 128
