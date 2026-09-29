@@ -84,20 +84,21 @@ class DynamicsTrainer:
         learning_rate=1e-3,
         physics_weight=0.1,
     ):
+
         self.model = model.to(device)
         self.device = device
         self.physics_weight = physics_weight
 
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
-            lr=learning_rate,
+            lr=learning_rate
         )
 
-    def train_step(
+    def train_batch(
         self,
         states,
         actions,
-        next_states,
+        next_states
     ):
 
         states = states.to(self.device)
@@ -106,30 +107,44 @@ class DynamicsTrainer:
 
         predicted_next = self.model(
             states,
-            actions,
+            actions
         )
 
-        data_loss = (
-            predicted_next - next_states
-        ).pow(2).mean()
+        # -----------------------------
+        # Data fitting loss
+        # -----------------------------
 
-        physics = physics_loss(
+        data_loss = F.mse_loss(
+            predicted_next,
+            next_states
+        )
+
+        # -----------------------------
+        # Physics loss
+        # -----------------------------
+
+        p_loss = physics_loss(
             states,
             predicted_next,
-            self.model.dt,
+            self.model.dt
         )
+
+        # -----------------------------
+        # Combined loss
+        # -----------------------------
 
         loss = (
             data_loss
-            + self.physics_weight * physics
+            + self.physics_weight * p_loss
         )
 
         self.optimizer.zero_grad()
+
         loss.backward()
 
         torch.nn.utils.clip_grad_norm_(
             self.model.parameters(),
-            10.0,
+            10.0
         )
 
         self.optimizer.step()
@@ -137,7 +152,7 @@ class DynamicsTrainer:
         return {
             "loss": loss.item(),
             "data_loss": data_loss.item(),
-            "physics_loss": physics.item(),
+            "physics_loss": p_loss.item(),
         }
 
 def physics_loss(
