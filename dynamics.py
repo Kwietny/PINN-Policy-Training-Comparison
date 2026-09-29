@@ -173,3 +173,59 @@ def physics_loss(state, predicted_next, dt):
     loss_y = (next_y - expected_y).pow(2).mean()
 
     return loss_x + loss_y
+
+def train_dynamics_model(
+    dynamics_model,
+    replay_buffer,
+    device,
+    epochs=10,
+    batch_size=256,
+):
+
+    trainer = DynamicsTrainer(
+        dynamics_model,
+        device,
+        learning_rate=1e-3,
+        physics_weight=0.1,
+    )
+
+    if len(replay_buffer) < batch_size:
+        return
+
+    for epoch in range(epochs):
+
+        states = []
+        actions = []
+        next_states = []
+
+        batch = replay_buffer.sample(batch_size)
+
+        for transition in batch:
+            state, action, next_state, reward, done = transition
+
+            states.append(state)
+            actions.append(action)
+            next_states.append(next_state)
+
+        states = torch.tensor(
+            states,
+            dtype=torch.float32,
+        )
+
+        actions = torch.tensor(
+            actions,
+            dtype=torch.long,
+        )
+
+        next_states = torch.tensor(
+            next_states,
+            dtype=torch.float32,
+        )
+
+        result = trainer.train_step(
+            states,
+            actions,
+            next_states,
+        )
+
+    return result
