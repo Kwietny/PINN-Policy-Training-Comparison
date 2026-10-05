@@ -14,7 +14,7 @@ from dynamics import PhysicsResidualDynamics, DynamicsTrainer, STATE_NAMES, eval
 
 # Initialize TensorBoard writer
 current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-writer = SummaryWriter(f'runs/pinn_dqn_{current_time}')
+writer = SummaryWriter(f'runs/pinn_res_1000_100_10_{current_time}')
 
 num_episodes = 200
 batch_size = 128
@@ -87,7 +87,7 @@ dynamics_trainer = DynamicsTrainer(
     dynamics_model,
     device=device,
     learning_rate=1e-3,
-    physics_weight=0.1
+    physics_weight=0.0
 )
 
 optimizer = optim.AdamW(policy_net.parameters(), lr=LR)
@@ -467,7 +467,7 @@ for episode in range(num_episodes):
     writer.add_scalar("Epsilon", EPSILON, episode)
 
     # UPDATE DYNAMICS MODEL
-    if episode >= 25 and episode % 25 == 0:
+    if episode >= 50 and episode % 10 == 0:
         print("Training dynamics model...")
 
         result = train_dynamics()

@@ -35,8 +35,6 @@ class PhysicsResidualDynamics(nn.Module):
         )
 
     def forward(self, state, action):
-
-        # action can arrive as [B, 1]
         if action.dim() > 1:
             action = action.squeeze(-1)
 
@@ -45,34 +43,13 @@ class PhysicsResidualDynamics(nn.Module):
             num_classes=4
         ).float()
 
-        x = torch.cat([state, action_one_hot], dim=1)
-
-        # Neural residual
-        residual = self.residual_net(x)
-
-        # -------------------------------------------------
-        # Basic physics prior
-        # -------------------------------------------------
-
-        physics_next = state.clone()
-
-        # x(t+dt) = x(t) + vx(t) dt
-        physics_next[:, 0] = (
-            state[:, 0]
-            + state[:, 2] * self.dt
+        x = torch.cat(
+            [state, action_one_hot],
+            dim=1
         )
 
-        # y(t+dt) = y(t) + vy(t) dt
-        physics_next[:, 1] = (
-            state[:, 1]
-            + state[:, 3] * self.dt
-        )
-
-        # Everything else is initially assumed unchanged.
-        #
-        # The neural network learns the correction.
-
-        predicted_next = physics_next + residual
+        # Directly predict the next state
+        predicted_next = self.residual_net(x)
 
         return predicted_next
 
