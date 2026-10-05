@@ -9,14 +9,15 @@ import torch.optim as optim
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter  # Import TensorBoard
 from dqn import DQN
+from reward_model import RewardModel, RewardTrainer
 
 from dynamics import PhysicsResidualDynamics, DynamicsTrainer, STATE_NAMES, evaluate_dynamics
 
 # Initialize TensorBoard writer
 current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-writer = SummaryWriter(f'runs/pinn_res_1000_100_10_{current_time}')
+writer = SummaryWriter(f'runs/pinn_res_rewest_1000_50_10_{current_time}')
 
-num_episodes = 200
+num_episodes = 300
 batch_size = 128
 GAMMA = 0.99
 LR = 1e-4
@@ -88,6 +89,14 @@ dynamics_trainer = DynamicsTrainer(
     device=device,
     learning_rate=1e-3,
     physics_weight=0.0
+)
+
+reward_model = RewardModel().to(device)
+
+reward_trainer = RewardTrainer(
+    reward_model,
+    device=device,
+    learning_rate=1e-3
 )
 
 optimizer = optim.AdamW(policy_net.parameters(), lr=LR)
@@ -250,6 +259,38 @@ def train_dynamics():
 
     return last_result
 
+def train_reward_model():
+
+    if len(real_memory) < DYNAMICS_BATCH_SIZE:
+        return None
+
+    last_loss = None
+
+    for _ in range(DYNAMICS_EPOCHS):
+
+        transitions = random.sample(
+            real_memory.memory,
+            DYNAMICS_BATCH_SIZE
+        )
+
+        states, actions, next_states, rewards, _ = zip(
+            *transitions
+        )
+
+        states = torch.cat(states)
+        actions = torch.cat(actions)
+        next_states = torch.cat(next_states)
+        rewards = torch.cat(rewards)
+
+        last_loss = reward_trainer.train_batch(
+            states,
+            actions,
+            next_states,
+            rewards
+        )
+
+    return last_loss
+
 
 def generate_model_transitions(
     num_samples=1000
@@ -289,17 +330,25 @@ def generate_model_transitions(
             .clamp(-10.0, 10.0)
         )
 
-        # TEMPORARY reward approximation
-        reward = estimate_reward(
-            state,
-            action,
-            next_state
-        )
+        # reward approximation
+        with torch.no_grad():
+            predicted_next_state = dynamics_model(
+                state,
+                action
+            )
+
+            predicted_reward = reward_model(
+                state,
+                action,
+                predicted_next_state
+            )
+
+            reward = predicted_reward.detach().view(1)
 
         # done = estimate_done(
         #     next_state
         # )
-        done = False
+        done = samples[i].done
 
         model_memory.push(
             state.detach(),
@@ -471,6 +520,20 @@ for episode in range(num_episodes):
         print("Training dynamics model...")
 
         result = train_dynamics()
+
+        reward_loss = train_reward_model()
+
+        if reward_loss is not None:
+            print(
+                f"Reward model loss: "
+                f"{reward_loss:.6f}"
+            )
+
+            writer.add_scalar(
+                "RewardModel/Loss",
+                reward_loss,
+                episode
+            )
 
         if result is not None:
             print("Dynamics:", result)
